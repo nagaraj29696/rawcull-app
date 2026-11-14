@@ -72,6 +72,68 @@ def _lap_var(gray_blur: np.ndarray, rect=None) -> float:
     return float(cv2.Laplacian(g, cv2.CV_32F).var())
 
 
+ALGO_VERSION = 2   # bump when measurements change so stale cache entries are recomputed
+
+
+def _edge_map(blur_u8: np.ndarray, min_contrast: float = 35.0) -> np.ndarray:
+    """Edge-width map.  At every strong edge pixel: width(px) = local contrast / gradient.
+    A crisp edge crosses from dark to light in ~3 px, a blurred one needs 7+ px.  The value is
+    independent of how much texture the scene has and barely affected by sensor noise (noise
+    does not create strong, high-contrast edges).  0 where there is no clean edge."""
+    g = blur_u8.astype(np.float32)
+    gx = cv2.Sobel(g, cv2.CV_32F, 1, 0, ksize=3) / 8.0
+    gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3) / 8.0
+    mag = cv2.magnitude(gx, gy)
+    contrast = cv2.dilate(g, np.ones((15, 15), np.uint8)) - cv2.erode(g, np.ones((15, 15), np.uint8))
+    is_ridge = mag >= cv2.dilate(mag, np.ones((3, 3), np.uint8))
+    ok = is_ridge & (contrast >= min_contrast) & (mag > 1.0)
+    out = np.zeros_like(g)
+    out[ok] = contrast[ok] / mag[ok]
+    return out
+
+
+def _edge_width(wmap: np.ndarray, rect, pct: float = 20, min_edges: int = 60):
+    """Sharpest-edge statistic (20th percentile of widths) inside rect, or None if too few edges."""
+    x0, y0, x1, y1 = rect
+    vals = wmap[y0:y1, x0:x1]
+    vals = vals[vals > 0]
+    if vals.size < min_edges:
+        return None, int(vals.size)
+    return float(np.percentile(vals, pct)), int(vals.size)
+
+
+def _edge_width_grow(wmap: np.ndarray, roi_norm, w: int, h: int, min_edges: int = 60):
+    """Measure inside the ROI; if it has too few edges (skin, sky) grow the box up to 3x."""
+    x, y, rw, rh = roi_norm
+    cx, cy = x + rw / 2, y + rh / 2
+    n = 0
+    for f in (1.0, 1.8, 3.0):
+        rect = _norm_to_px((cx - rw * f / 2, cy - rh * f / 2, rw * f, rh * f), w, h)
+        ew, n = _edge_width(wmap, rect, min_edges=min_edges)
+        if ew is not None:
+            return ew, n
+    return None, n
+
+
+def _peak_edge(wmap: np.ndarray, grid=(8, 6)):
+    """No AF point and no face: take the sharpest tiles of the frame (mean of the best three)."""
+    h, w = wmap.shape
+    gx, gy = grid
+    tw, th = w // gx, h // gy
+    found = []
+    for j in range(gy):
+        for i in range(gx):
+            rect = (i * tw, j * th, (i + 1) * tw, (j + 1) * th)
+            ew, _ = _edge_width(wmap, rect, min_edges=25)
+            if ew is not None:
+                found.append((ew, rect))
+    if not found:
+        return None, None
+    found.sort(key=lambda t: t[0])
+    x0, y0, x1, y1 = found[0][1]
+    return float(np.mean([f[0] for f in found[:3]])), (x0 / w, y0 / h, (x1 - x0) / w, (y1 - y0) / h)
+
+
 def _norm_to_px(rect, w, h):
     x, y, rw, rh = rect
     x0 = int(max(0, min(w - 1, round(x * w))))
@@ -175,6 +237,8 @@ def analyze_file(job: dict) -> dict:
         af = exif_mod.focus_point(exif)
         global_var = _lap_var(blur)
         peak_var, peak_rect = _peak_tile(blur)
+        wmap = _edge_map(blur)
+        edge_w = edge_n = None
 
         if af is not None:
             fx, fy = map_sensor_point(af[0], af[1], prev.flip)
@@ -188,11 +252,21 @@ def analyze_file(job: dict) -> dict:
             roi, source = faces[0], "face"
         else:
             roi, source = peak_rect, "peak"
-        focus_var = _lap_var(blur, _norm_to_px(roi, w, h)) if source != "peak" else peak_var
 
-        face_var = eyes = None
+        if source == "peak":
+            pw, prect = _peak_edge(wmap)
+            if pw is not None:
+                edge_w, roi = pw, prect
+            focus_var = peak_var
+        else:
+            edge_w, edge_n = _edge_width_grow(wmap, roi, w, h)
+            focus_var = _lap_var(blur, _norm_to_px(roi, w, h))
+        edge_w_global, _ = _edge_width(wmap, (0, 0, w, h), min_edges=100)
+
+        face_var = eyes = face_edge_w = None
         if faces:
             face_var = _lap_var(blur, _norm_to_px(faces[0], w, h))
+            face_edge_w, _ = _edge_width_grow(wmap, faces[0], w, h, min_edges=30)
             try:
                 eyes = _eye_hint(gray, faces[0])
             except Exception:
@@ -206,7 +280,10 @@ def analyze_file(job: dict) -> dict:
             "w": int(w0), "h": int(h0), "flip": int(prev.flip),
             "thumb": str(thumb_path),
             "dhash": dhash_hex(gray),
+            "algo": ALGO_VERSION,
             "focus_var": float(focus_var), "global_var": float(global_var),
+            "edge_w": edge_w, "edge_n": edge_n, "edge_w_global": edge_w_global,
+            "face_edge_w": face_edge_w,
             "roi": [float(v) for v in roi], "roi_source": source,
             "faces": [[float(v) for v in f] for f in faces],
             "face_var": None if face_var is None else float(face_var),

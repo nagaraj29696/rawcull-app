@@ -14,7 +14,7 @@ from typing import Callable
 
 from . import exif as exif_mod
 from . import xmp
-from .analysis import analyze_file
+from .analysis import ALGO_VERSION, analyze_file
 from .config import Settings
 from .loader import list_images
 from .scoring import effective, finalize
@@ -68,7 +68,7 @@ def run_analysis(folder, settings: Settings, progress: ProgressCB | None = None,
         fp = f"{st.st_size}:{int(st.st_mtime)}"
         hit = cache.get(p.name)
         if (hit and hit.get("fingerprint") == fp and hit.get("mode") == settings.mode
-                and not hit.get("error") and Path(hit.get("thumb", "")).exists()):
+                and hit.get("algo") == ALGO_VERSION and not hit.get("error") and Path(hit.get("thumb", "")).exists()):
             results[p.name] = hit
         else:
             todo.append(p)

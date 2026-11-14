@@ -16,7 +16,7 @@ import numpy as np
 from PySide6.QtCore import QRectF, QSettings, QSize, Qt, QThread, Signal
 from PySide6.QtGui import (QAction, QColor, QFont, QIcon, QImage, QKeySequence, QPainter,
                            QPalette, QPen, QPixmap, QShortcut)
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
                                QFrame, QGraphicsRectItem, QGraphicsScene, QGraphicsView,
                                QHBoxLayout, QLabel, QListView, QListWidget, QListWidgetItem,
                                QMainWindow, QMessageBox, QProgressBar, QPushButton, QSplitter,
@@ -28,7 +28,7 @@ from .analysis import faces_available
 from .config import Settings
 from .loader import load_fullres_rgb, load_preview
 from .pipeline import (export_csv, export_picks, run_analysis, save_decisions, write_xmp_all)
-from .scoring import effective
+from .scoring import effective, finalize
 
 GREEN, RED, AMBER, GREY = QColor("#3fb950"), QColor("#f85149"), QColor("#d29922"), QColor("#8b949e")
 ICON_W, ICON_H = 168, 132
@@ -348,6 +348,18 @@ class MainWindow(QMainWindow):
         self.sort_box.currentIndexChanged.connect(lambda _: self.rebuild_grid())
         tb.addWidget(self.sort_box)
 
+        tb.addWidget(QLabel("   Blur limit "))
+        self.blur_spin = QDoubleSpinBox()
+        self.blur_spin.setRange(4.2, 12.0)
+        self.blur_spin.setSingleStep(0.2)
+        self.blur_spin.setDecimals(1)
+        self.blur_spin.setSuffix(" px")
+        self.blur_spin.setValue(self.settings.edge_blur_px)
+        self.blur_spin.setToolTip("Edge width at which a photo counts as fully blurred (see 'edge width' in the "
+                                  "side panel).\nLower = stricter: more photos are marked soft. Re-scores instantly.")
+        self.blur_spin.valueChanged.connect(self._on_strictness)
+        tb.addWidget(self.blur_spin)
+
         self.act_write = QAction("Write XMP ratings", self, triggered=self.write_xmp)
         self.act_export = QAction("Export picks…", self, triggered=self.export_picks_dialog)
         self.act_csv = QAction("Export CSV…", self, triggered=self.export_csv_dialog)
@@ -453,17 +465,37 @@ class MainWindow(QMainWindow):
         self.thumb_cache.clear()
         self.rebuild_grid()
         self._update_state()
-        ok = [r for r in results if not r.get("error")]
+        self._update_summary()
+        if not [r for r in results if not r.get("error")]:
+            self.preview.clear_image("No readable photos found in this folder")
+
+    def _update_summary(self):
+        ok = [r for r in self.results if not r.get("error")]
         picks = sum(1 for r in ok if effective(r)[1] == "pick")
         rej = sum(1 for r in ok if effective(r)[1] == "reject")
         groups = len({r["group"] for r in ok})
-        note = "" if exif_mod.have_exiftool() else "  ·  exiftool not found: using sharpest-area instead of the camera AF point"
+        af = sum(1 for r in ok if r["roi_source"] == "af_point")
+        note = ""
+        if not exif_mod.have_exiftool():
+            note += "  ·  exiftool not found: measuring the sharpest area instead of the camera AF point"
+        elif ok and af == 0:
+            note += "  ·  no AF point found in the EXIF data: measuring the sharpest area"
+        elif ok and af < len(ok):
+            note += f"  ·  AF point known for {af}/{len(ok)} photos"
         if not faces_available():
             note += "  ·  face detection off (install the opencv-data package)"
         self._msg(f"{len(ok)} photos · {groups} groups · {picks} picks · {rej} auto-rejected"
-                  f" · {len(results) - len(ok)} unreadable{note}")
-        if not ok:
-            self.preview.clear_image("No readable photos found in this folder")
+                  f" · {len(self.results) - len(ok)} unreadable{note}")
+
+    def _on_strictness(self, value: float):
+        """Re-score instantly (no re-analysis) when the blur limit changes."""
+        if not self.results:
+            return
+        self.settings.edge_blur_px = value
+        finalize(self.results, self.settings)
+        self.thumb_cache.clear()
+        self.rebuild_grid()
+        self._update_summary()
 
     # ---- grid ----------------------------------------------------------------------
     def _visible(self, r: dict) -> bool:
@@ -600,7 +632,11 @@ class MainWindow(QMainWindow):
             self.bars["face"].setValue(int(r["face_s"] * 100))
             self.bars["face"].setFormat("%p%")
         src = {"af_point": "camera AF point", "face": "main face", "peak": "sharpest area"}[r["roi_source"]]
-        self.group_lbl.setText(f"Group {r['group']} · rank {r['group_rank']} of {r['group_size']} · focus measured at {src}")
+        ew = r.get("edge_w")
+        edge_txt = (f"edge width {ew:.1f} px (about 3 = crisp, 7+ = blurred)" if ew is not None
+                    else "no clean edges found at the focus area")
+        self.group_lbl.setText(f"Group {r['group']} · rank {r['group_rank']} of {r['group_size']}<br>"
+                               f"Focus measured at {src}: {edge_txt}")
         self.reason_lbl.setText("<br>• " + "<br>• ".join(r["reasons"]) if r["reasons"] else "")
 
     # ---- actions ----------------------------------------------------------------------

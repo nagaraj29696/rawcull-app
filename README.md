@@ -40,11 +40,18 @@ Manual install: `sudo apt install libimage-exiftool-perl opencv-data libxcb-curs
 
 | Measure | What it does |
 |---|---|
-| Focus | Sharpness (Laplacian variance, log-scaled) measured **only at the AF point** from the camera's EXIF data. Without exiftool it uses the main face, else the sharpest part of the frame. |
+| Focus | **Edge width**: how many pixels a boundary needs to go from dark to light (about 3 px = crisp, 6+ px = blurred). Unlike contrast measures it ignores scene texture and sensor noise, so a high-ISO blurry shot is not mistaken for a sharp one. Measured **at the camera's AF point** when exiftool provides it, otherwise on the main face, otherwise in the sharpest part of the frame. |
 | Exposure | Penalises clipped highlights, crushed shadows and very dark / very bright frames. |
 | Faces | If a face is found: sharpness on the face plus a blink hint (no eyes detected on a frontal face). |
-| Groups | Shots within 8 s of each other that look alike (perceptual hash) form a group. Within a group the sharpest frame is compared against its siblings, so only the best one is suggested. |
-| Rating | 1-5 stars by percentile across the whole shoot; clearly soft or badly exposed frames are suggested rejects. |
+| Groups | Shots within 8 s of each other that look alike (perceptual hash) form a group. Within a group the highest score is the suggested pick. |
+| Score | Absolute, 0-100, and focus gates it: a soft frame cannot be rescued by good exposure, and a group where every frame is soft gets **no** pick. |
+| Rating | 1-5 stars from the score (88+ = 5, 75+ = 4, 60+ = 3, 40+ = 2); 5 stars only for the best of a group. Soft or badly exposed frames are suggested rejects. |
+
+If too many soft photos still look good (or good ones look soft), change **Blur limit** in the toolbar. It is the edge width
+at which a photo counts as fully blurred; lower = stricter. Scores update instantly without re-analysing. The side panel
+shows each photo's measured edge width so you can pick a sensible value from a few known-sharp and known-soft frames.
+The status bar tells you whether the camera's AF point was found; if it says it was not, focus is measured in the sharpest area
+of the frame, which cannot tell "subject blurry, background sharp" from a good shot.
 
 Modes: **Fast** reads the JPEG preview embedded in each ARW (about 1620 px, quick); **Accurate** demosaics the RAW
 at half size (slower, closer to the real pixels).

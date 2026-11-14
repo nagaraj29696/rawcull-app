@@ -55,9 +55,13 @@ def focus_point(exif: dict) -> tuple[float, float] | None:
             continue
         if len(nums) < 4:
             continue
-        w, h, x, y = nums[:4]
-        if w > 0 and h > 0 and 0 <= x <= w and 0 <= y <= h and (x or y):
-            return x / w, y / h
+        # exiftool: "width height x y".  Some tools report 5 values ("width height ? x y").
+        w, h = nums[0], nums[1]
+        pairs = [(3, 4), (2, 3)] if len(nums) >= 5 else [(2, 3)]
+        for ix, iy in pairs:
+            x, y = nums[ix], nums[iy]
+            if w > 0 and h > 0 and 0 <= x <= w and 0 <= y <= h and (x or y):
+                return x / w, y / h
     return None
 
 

@@ -17,13 +17,20 @@ class Settings:
     group_time_gap: float = 8.0        # seconds between shots that still count as one group
     group_hash_dist: int = 70          # max perceptual-hash distance (of 256 bits)
 
-    # sharpness mapping: Laplacian variance -> 0..1 on a log scale
+    # Sharpness is measured as *edge width*: how many pixels a boundary needs to go from dark to
+    # light at the 1600 px analysis size (about 3 px = crisp, 7+ px = clearly blurred).
+    # This does not depend on scene texture or sensor noise the way contrast measures do.
+    edge_sharp_px: float = 3.6         # at or below this width -> sharpness 1.0
+    edge_blur_px: float = 6.4          # at or above this width -> sharpness 0.0 (lower = stricter)
+    # Fallback / tie-break: Laplacian variance mapped to 0..1 on a log scale
     focus_lo: float = 8.0
     focus_hi: float = 800.0
 
     # automatic reject thresholds
-    reject_focus: float = 0.12
+    reject_focus: float = 0.20
     reject_exposure: float = 0.20
+    # the best shot of a group is only suggested as a pick when its score reaches this
+    pick_min_score: float = 55.0
 
     picks_per_group: int = 1
     workers: int = 0                   # 0 = number of CPU cores
