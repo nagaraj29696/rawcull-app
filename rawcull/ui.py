@@ -516,6 +516,9 @@ class MainWindow(QMainWindow):
             pm = pm.scaled(ICON_W - 6, ICON_H - 22, Qt.AspectRatioMode.KeepAspectRatio,
                            Qt.TransformationMode.SmoothTransformation)
             p.drawPixmap((ICON_W - pm.width()) // 2, 3 + (ICON_H - 22 - pm.height()) // 2, pm)
+        if r.get("error"):
+            p.setPen(RED)
+            p.drawText(8, 20, "Cannot read this file")
         color = GREEN if flag == "pick" else RED if flag == "reject" else None
         if color:
             p.setPen(QPen(color, 4))

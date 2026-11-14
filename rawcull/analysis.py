@@ -32,11 +32,17 @@ _CASCADE_DIRS = [
 
 
 def _load_cascade(filename: str):
+    # Some OpenCV builds (e.g. 5.x headless wheels) have no CascadeClassifier at all.
+    if not hasattr(cv2, "CascadeClassifier"):
+        return None
     for d in _CASCADE_DIRS:
-        if d and os.path.isfile(os.path.join(d, filename)):
-            c = cv2.CascadeClassifier(os.path.join(d, filename))
-            if not c.empty():
-                return c
+        try:
+            if d and os.path.isfile(os.path.join(d, filename)):
+                c = cv2.CascadeClassifier(os.path.join(d, filename))
+                if not c.empty():
+                    return c
+        except Exception:
+            continue
     return None
 
 
@@ -162,7 +168,10 @@ def analyze_file(job: dict) -> dict:
         cv2.imwrite(str(thumb_path), thumb, [cv2.IMWRITE_JPEG_QUALITY, 82])
 
         # --- where is the subject? -------------------------------------------------------
-        faces = _detect_faces(gray)
+        try:
+            faces = _detect_faces(gray)
+        except Exception:   # face detection is optional; never fail a photo because of it
+            faces = []
         af = exif_mod.focus_point(exif)
         global_var = _lap_var(blur)
         peak_var, peak_rect = _peak_tile(blur)
@@ -184,7 +193,10 @@ def analyze_file(job: dict) -> dict:
         face_var = eyes = None
         if faces:
             face_var = _lap_var(blur, _norm_to_px(faces[0], w, h))
-            eyes = _eye_hint(gray, faces[0])
+            try:
+                eyes = _eye_hint(gray, faces[0])
+            except Exception:
+                eyes = None
 
         # --- exposure --------------------------------------------------------------------
         clip_hi = float((bgr.max(axis=2) >= 252).mean())

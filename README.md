@@ -1,6 +1,6 @@
 # RawCull
 
-Finds the best shots in a folder of RAW photos (built for Sony  `.ARW`, works with other RAW formats
+Finds the best shots in a folder of RAW photos (built for Sony A6400 `.ARW`, works with other RAW formats
 and JPEGs too). It scores every photo, groups bursts and near-duplicates, picks the best of each group,
 and shows everything in a preview window so you can confirm or override the picks quickly.
 
