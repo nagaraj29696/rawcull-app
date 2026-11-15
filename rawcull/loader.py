@@ -66,7 +66,14 @@ def _pil_to_bgr(im: Image.Image) -> np.ndarray:
     return np.ascontiguousarray(np.asarray(im.convert("RGB"))[:, :, ::-1])
 
 
-def load_preview(path, mode: str = "fast", min_edge: int = 1000) -> Preview:
+def ensure_unpacked(raw) -> None:
+    """RawPy unpacks lazily; touching a pixel property triggers it exactly once."""
+    _ = raw.raw_image_visible
+
+
+def load_preview(path, mode: str = "fast", min_edge: int = 1000, raw=None) -> Preview:
+    """Upright BGR preview.  Pass an already opened `rawpy.RawPy` as `raw` to reuse it (it is
+    then left open); otherwise the file is opened and closed here."""
     path = Path(path)
     if not is_raw(path):
         with Image.open(path) as im:
@@ -77,7 +84,11 @@ def load_preview(path, mode: str = "fast", min_edge: int = 1000) -> Preview:
 
     import rawpy
 
-    with rawpy.imread(str(path)) as raw:
+    own = raw is None
+    if own:
+        raw = rawpy.RawPy()
+        raw.open_file(str(path))      # metadata + embedded thumbnail only; pixels are unpacked lazily
+    try:
         flip = int(raw.sizes.flip)
         sensor_landscape = raw.sizes.width >= raw.sizes.height
         if mode == "fast":
@@ -99,8 +110,12 @@ def load_preview(path, mode: str = "fast", min_edge: int = 1000) -> Preview:
                         arr = rotate_upright(arr, flip)
                     return Preview(np.ascontiguousarray(arr), flip)
         # accurate mode, or no usable embedded preview: LibRaw output is already upright
+        ensure_unpacked(raw)
         rgb = raw.postprocess(half_size=True, use_camera_wb=True, output_bps=8)
         return Preview(np.ascontiguousarray(rgb[:, :, ::-1]), flip)
+    finally:
+        if own:
+            raw.close()
 
 
 def load_fullres_rgb(path) -> np.ndarray:

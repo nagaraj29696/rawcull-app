@@ -32,6 +32,15 @@ class Settings:
     # the best shot of a group is only suggested as a pick when its score reaches this
     pick_min_score: float = 55.0
 
+    # Subject detection (birds / animals / people): sharpness is judged on the subject itself.
+    subject_mode: str = "birds_animals"   # off | birds | birds_animals | animals | people | any
+    subject_conf: float = 0.30            # detector confidence threshold
+    small_subjects: bool = True           # look for small subjects in native-resolution windows
+    subject_sharp_px: float = 3.2         # subject edge width (native px) at or below -> sharpness 1.0
+    subject_blur_px: float = 6.0          # at or above -> sharpness 0.0 (lower = stricter)
+    subject_preblur: float = 0.7
+    subject_af_penalty: float = 0.9       # score factor when the AF point is not on the subject
+
     picks_per_group: int = 1
     workers: int = 0                   # 0 = number of CPU cores
     write_lightroom_xmp: bool = False  # also write IMG_0001.xmp next to IMG_0001.ARW.xmp

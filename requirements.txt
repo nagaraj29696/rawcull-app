@@ -4,3 +4,5 @@ rawpy>=0.19
 opencv-python-headless>=4.8,<5
 numpy>=1.24
 Pillow>=10.0
+# subject detection (birds / animals / people); the 36 MB YOLOX model is downloaded on first use
+onnxruntime>=1.17

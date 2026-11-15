@@ -8,10 +8,12 @@ import multiprocessing as mp
 import os
 import shutil
 import threading
+from dataclasses import replace
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable
 
+from . import detect
 from . import exif as exif_mod
 from . import xmp
 from .analysis import ALGO_VERSION, analyze_file
@@ -36,9 +38,16 @@ def _read_json(path: Path, default):
         return default
 
 
+def _json_default(o):
+    """numpy scalars/arrays sneak into results; store them as plain Python values."""
+    if hasattr(o, "item"):
+        return o.item() if getattr(o, "ndim", 0) == 0 else o.tolist()
+    raise TypeError(f"{type(o).__name__} is not JSON serializable")
+
+
 def _write_json(path: Path, data) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data), encoding="utf-8")
+    tmp.write_text(json.dumps(data, default=_json_default), encoding="utf-8")
     tmp.replace(path)
 
 
@@ -52,9 +61,19 @@ def save_decisions(folder, results: list[dict]) -> None:
 
 
 def run_analysis(folder, settings: Settings, progress: ProgressCB | None = None,
-                 cancel: threading.Event | None = None, force: bool = False) -> list[dict]:
-    """Analyse every image in `folder`; returns finalized results (scores, groups, picks)."""
+                 cancel: threading.Event | None = None, force: bool = False,
+                 notices: list[str] | None = None,
+                 model_progress: Callable[[int, int], None] | None = None) -> list[dict]:
+    """Analyse every image in `folder`; returns finalized results (scores, groups, picks).
+    Human-readable problems (e.g. the detector model could not be downloaded) go to `notices`."""
     folder = Path(folder)
+    if settings.subject_mode != "off" and not detect.model_ready():
+        try:
+            detect.ensure_model(model_progress)
+        except Exception as exc:
+            if notices is not None:
+                notices.append(f"Subject detection is off: could not get the detector model ({exc})")
+            settings = replace(settings, subject_mode="off")
     cdir = cache_dir_for(folder)
     thumb_dir = cdir / "thumbs"
     files = list_images(folder)
@@ -68,7 +87,9 @@ def run_analysis(folder, settings: Settings, progress: ProgressCB | None = None,
         fp = f"{st.st_size}:{int(st.st_mtime)}"
         hit = cache.get(p.name)
         if (hit and hit.get("fingerprint") == fp and hit.get("mode") == settings.mode
-                and hit.get("algo") == ALGO_VERSION and not hit.get("error") and Path(hit.get("thumb", "")).exists()):
+                and hit.get("algo") == ALGO_VERSION
+                and (settings.subject_mode == "off" or hit.get("subjects_done"))
+                and not hit.get("error") and Path(hit.get("thumb", "")).exists()):
             results[p.name] = hit
         else:
             todo.append(p)

@@ -56,10 +56,35 @@ of the frame, which cannot tell "subject blurry, background sharp" from a good s
 Modes: **Fast** reads the JPEG preview embedded in each ARW (about 1620 px, quick); **Accurate** demosaics the RAW
 at half size (slower, closer to the real pixels).
 
+## Birds, animals and people (subject detection)
+
+Pick **Subject** in the toolbar (default *Birds + animals*; *Off* gives the whole-frame behaviour). RawCull then:
+
+1. **Finds the subject** with a YOLOX-S detector (COCO classes: bird, cat, dog, horse, sheep, cow, elephant, bear, zebra,
+   giraffe, person). The 36 MB model is downloaded once to `~/.cache/rawcull/models` (checksum verified); the app asks first.
+2. **Looks harder for small birds.** If nothing was found where the camera focused, it searches 640 px and 320 px windows
+   cut from the *native-resolution* RAW pixels around the AF point (or around the two sharpest regions when there is no AF
+   point). A bird that is 40 px wide in the 1600 px preview is about 150 px wide in the RAW, which the detector can handle.
+3. **Judges focus on the bird itself**, on native pixels (the RAW mosaic binned 2x2, so no slow demosaic), inside an ellipse
+   in the subject box so background edges don't count. The side panel shows the measured edge width and the subject's size.
+4. **Checks the AF point.** If the AF point is not on the subject the score is reduced and the reasons say
+   *"AF point is not on the bird: focus may have landed on the background"*.
+
+The preview draws the measured subject in green, other detected subjects in cyan and the AF point as a yellow cross.
+Changing the Subject type re-scores instantly once subjects have been detected (a full pass only runs the first time).
+If no subject of the chosen type is found, that photo falls back to the whole-frame focus measure and the reasons say so.
+The **Blur limit** control also applies to subjects.
+
+Honest limits: tiny or far-away birds (roughly under 60 px wide at native resolution), birds in dense foliage and
+birds in flight that the detector misses will fall back to the whole-frame measure; the detector knows "bird", not
+species; and the AF check needs the camera's AF point to be readable from the EXIF data.
+
 ## Command line
 
 ```bash
 ./run.sh --cli ~/Pictures/shoot --csv ranked.csv --export-picks ~/Pictures/shoot-picks --write-xmp
+./run.sh --cli ~/Pictures/shoot --subject birds          # birds only (also: birds_animals, animals, people, any, off)
+./run.sh --cli --fetch-model                              # download the detector model and exit
 ```
 
 ## Limits worth knowing
@@ -81,4 +106,6 @@ rawcull/loader.py     RAW preview / full decode   rawcull/grouping.py  burst gro
 rawcull/exif.py       exiftool wrapper            rawcull/xmp.py       sidecar writing
 rawcull/pipeline.py   parallel run, cache, export rawcull/ui.py        Qt window
 rawcull/cli.py        command-line mode           tests/               python tests/test_core.py
+rawcull/detect.py     YOLOX detector, tiling      rawcull/subject.py   subject stage (small birds)
+rawcull/native.py     native-resolution crops     tools/               synthetic test photos / DNGs
 ```

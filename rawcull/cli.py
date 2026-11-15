@@ -11,7 +11,14 @@ from .scoring import effective
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="rawcull", description="Rank and cull a folder of RAW photos.")
-    p.add_argument("folder", help="folder containing ARW (or other RAW / JPEG) files")
+    p.add_argument("folder", nargs="?", help="folder containing ARW (or other RAW / JPEG) files")
+    p.add_argument("--subject", choices=["off", "birds", "birds_animals", "animals", "people", "any"],
+                   default="birds_animals",
+                   help="judge focus on detected subjects of this type (default: birds_animals); off = whole frame")
+    p.add_argument("--no-small-subjects", action="store_true",
+                   help="skip the extra native-resolution search for small subjects (faster)")
+    p.add_argument("--fetch-model", action="store_true",
+                   help="download the subject-detection model (36 MB) and exit")
     p.add_argument("--mode", choices=["fast", "accurate"], default="fast",
                    help="fast = embedded JPEG previews, accurate = half-size RAW demosaic")
     p.add_argument("--workers", type=int, default=0, help="worker processes (default: all cores)")
@@ -28,16 +35,36 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.fetch_model:
+        from . import detect
+
+        def prog(done, total):
+            sys.stderr.write(f"\r  downloading model {done / 1e6:.0f}/{total / 1e6:.0f} MB")
+            sys.stderr.flush()
+
+        path = detect.ensure_model(prog)
+        sys.stderr.write("\n")
+        print(f"Detector model ready: {path}")
+        return 0
+    if not args.folder:
+        parser.error("folder is required")
     s = Settings(mode=args.mode, workers=args.workers, group_time_gap=args.time_gap,
-                 picks_per_group=args.picks_per_group, write_lightroom_xmp=args.lightroom_xmp)
+                 picks_per_group=args.picks_per_group, write_lightroom_xmp=args.lightroom_xmp,
+                 subject_mode=args.subject, small_subjects=not args.no_small_subjects)
 
     def progress(done, total, name):
         sys.stderr.write(f"\r  analysing {done}/{total} {name[:30]:<30}")
         sys.stderr.flush()
 
-    results = run_analysis(args.folder, s, progress, force=args.force)
+    notices: list[str] = []
+    results = run_analysis(args.folder, s, progress, force=args.force, notices=notices,
+                           model_progress=lambda d, t: sys.stderr.write(
+                               f"\r  downloading detector model {d / 1e6:.0f}/{t / 1e6:.0f} MB"))
     sys.stderr.write("\n")
+    for n in notices:
+        print(f"! {n}")
     if not results:
         print("No images found.")
         return 1
@@ -46,6 +73,8 @@ def main(argv=None) -> int:
     picks = [r for r in ok if effective(r)[1] == "pick"]
     rejects = [r for r in ok if effective(r)[1] == "reject"]
     groups = len({r["group"] for r in ok})
+    if s.subject_mode != "off":
+        print(f"{sum(1 for r in ok if r.get('subject'))}/{len(ok)} photos with a {s.subject_mode.replace('_', ' + ')} subject found")
     print(f"{len(ok)} images analysed, {groups} groups, {len(picks)} picks, {len(rejects)} auto-rejects, "
           f"{len(results) - len(ok)} unreadable")
     print(f"\n{'file':<22}{'score':>6}{'grp':>5}{'rank':>6}  flag    notes")

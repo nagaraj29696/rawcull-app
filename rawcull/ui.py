@@ -17,12 +17,13 @@ from PySide6.QtCore import QRectF, QSettings, QSize, Qt, QThread, Signal
 from PySide6.QtGui import (QAction, QColor, QFont, QIcon, QImage, QKeySequence, QPainter,
                            QPalette, QPen, QPixmap, QShortcut)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-                               QFrame, QGraphicsRectItem, QGraphicsScene, QGraphicsView,
+                               QFrame, QGraphicsLineItem, QGraphicsRectItem, QGraphicsScene, QGraphicsView,
                                QHBoxLayout, QLabel, QListView, QListWidget, QListWidgetItem,
                                QMainWindow, QMessageBox, QProgressBar, QPushButton, QSplitter,
                                QToolBar, QVBoxLayout, QWidget)
 
 from . import __version__
+from . import detect
 from . import exif as exif_mod
 from .analysis import faces_available
 from .config import Settings
@@ -31,6 +32,7 @@ from .pipeline import (export_csv, export_picks, run_analysis, save_decisions, w
 from .scoring import effective, finalize
 
 GREEN, RED, AMBER, GREY = QColor("#3fb950"), QColor("#f85149"), QColor("#d29922"), QColor("#8b949e")
+CYAN, YELLOW = QColor("#39c5cf"), QColor("#f2e94e")
 ICON_W, ICON_H = 168, 132
 
 
@@ -56,12 +58,14 @@ class AnalysisThread(QThread):
         super().__init__(parent)
         self.folder, self.settings, self.force = folder, settings, force
         self.cancel_event = threading.Event()
+        self.notices: list[str] = []
 
     def run(self):
         try:
             res = run_analysis(self.folder, self.settings,
                                lambda d, t, n: self.progress.emit(d, t, n),
-                               self.cancel_event, self.force)
+                               self.cancel_event, self.force, notices=self.notices,
+                               model_progress=lambda d, t: self.progress.emit(d, t, "model download"))
             if not self.cancel_event.is_set():
                 self.finished_ok.emit(res)
         except Exception as exc:  # surfaced to the user in a dialog
@@ -101,6 +105,8 @@ class PreviewView(QGraphicsView):
         self._overlay_items: list = []
         self._roi = None
         self._faces: list = []
+        self._others: list = []
+        self._af = None
         self._source = ""
         self.overlays_on = True
         self.fit_mode = True
@@ -124,8 +130,11 @@ class PreviewView(QGraphicsView):
         if self.fit_mode:
             self.fit()
 
-    def set_overlays(self, roi, faces, source):
+    def set_overlays(self, roi, faces, source, others=(), af=None):
+        """roi: (x, y, w, h) measured area (the subject box when a subject was found);
+        others: other detected subjects as dicts with a normalised x0,y0,x1,y1 'box'; af: AF point."""
         self._roi, self._faces, self._source = roi, faces, source
+        self._others, self._af = list(others), af
         self._rebuild_overlays()
 
     def _rebuild_overlays(self):
@@ -147,10 +156,23 @@ class PreviewView(QGraphicsView):
             self._scene.addItem(item)
             self._overlay_items.append(item)
 
+        for d in self._others:
+            x0, y0, x1, y1 = d["box"]
+            add((x0, y0, x1 - x0, y1 - y0), CYAN, 1.2)
         for f in self._faces:
             add(f, AMBER, 1.5)
         if self._roi is not None:
             add(self._roi, GREEN, 2.5)
+        if self._af is not None:        # AF point: yellow cross
+            ax, ay, arm = self._af[0] * W, self._af[1] * H, 0.012 * max(W, H)
+            for x0, y0, x1, y1 in ((ax - arm, ay, ax + arm, ay), (ax, ay - arm, ax, ay + arm)):
+                line = QGraphicsLineItem(x0, y0, x1, y1)
+                pen = QPen(YELLOW, 2)
+                pen.setCosmetic(True)
+                line.setPen(pen)
+                line.setZValue(11)
+                self._scene.addItem(line)
+                self._overlay_items.append(line)
 
     def toggle_overlays(self):
         self.overlays_on = not self.overlays_on
@@ -229,9 +251,11 @@ class MainWindow(QMainWindow):
 
         self.preview = PreviewView()
         self.preview.clear_image("Open a folder of photos to begin  (Ctrl+O)")
-        self.legend = QLabel("<span style='color:#3fb950'>■</span> focus area measured &nbsp; "
-                             "<span style='color:#d29922'>■</span> detected faces &nbsp;&nbsp; "
-                             "double-click / Z = 100% · wheel = zoom · F = fit · O = overlays")
+        self.legend = QLabel("<span style='color:#3fb950'>■</span> measured (subject or focus area) &nbsp; "
+                             "<span style='color:#39c5cf'>■</span> other subjects &nbsp; "
+                             "<span style='color:#f2e94e'>+</span> AF point &nbsp; "
+                             "<span style='color:#d29922'>■</span> faces &nbsp;&nbsp; "
+                             "Z / double-click = 100% · wheel = zoom · F = fit · O = overlays")
         self.legend.setStyleSheet("color:#8b949e; padding:4px 8px;")
         centre = QWidget()
         cl = QVBoxLayout(centre)
@@ -256,6 +280,10 @@ class MainWindow(QMainWindow):
         sl.addWidget(self.score_lbl)
         sl.addWidget(self.state_lbl)
         sl.addWidget(self.exif_lbl)
+        self.subject_lbl = QLabel("")
+        self.subject_lbl.setWordWrap(True)
+        self.subject_lbl.setStyleSheet("color:#39c5cf")
+        sl.addWidget(self.subject_lbl)
 
         form = QFormLayout()
         self.bars = {}
@@ -348,6 +376,17 @@ class MainWindow(QMainWindow):
         self.sort_box.currentIndexChanged.connect(lambda _: self.rebuild_grid())
         tb.addWidget(self.sort_box)
 
+        tb.addWidget(QLabel("   Subject "))
+        self.subject_box = QComboBox()
+        self.subject_box.addItem("Off (whole frame)", "off")
+        for key in ("birds", "birds_animals", "animals", "people", "any"):
+            self.subject_box.addItem(detect.SUBJECT_LABELS[key], key)
+        self.subject_box.setCurrentIndex(self.subject_box.findData(self.settings.subject_mode))
+        self.subject_box.setToolTip("Find the subject and judge focus on it (and check the AF point is on it).\n"
+                                    "Switching type re-scores instantly; the first use downloads a 36 MB detector model.")
+        self.subject_box.currentIndexChanged.connect(self._on_subject_changed)
+        tb.addWidget(self.subject_box)
+
         tb.addWidget(QLabel("   Blur limit "))
         self.blur_spin = QDoubleSpinBox()
         self.blur_spin.setRange(4.2, 12.0)
@@ -356,7 +395,8 @@ class MainWindow(QMainWindow):
         self.blur_spin.setSuffix(" px")
         self.blur_spin.setValue(self.settings.edge_blur_px)
         self.blur_spin.setToolTip("Edge width at which a photo counts as fully blurred (see 'edge width' in the "
-                                  "side panel).\nLower = stricter: more photos are marked soft. Re-scores instantly.")
+                                  "side panel).\nLower = stricter: more photos are marked soft. Applies to the frame "
+                                  "and to detected subjects. Re-scores instantly.")
         self.blur_spin.valueChanged.connect(self._on_strictness)
         tb.addWidget(self.blur_spin)
 
@@ -434,6 +474,8 @@ class MainWindow(QMainWindow):
             return
         self.settings.mode = self.mode_box.currentData()
         self.settings.write_lightroom_xmp = self.act_lr.isChecked()
+        if not self._confirm_model():
+            return
         self.worker = AnalysisThread(self.folder, self.settings, force, self)
         self.worker.progress.connect(self._on_progress)
         self.worker.finished_ok.connect(self._on_analysis_done)
@@ -444,6 +486,36 @@ class MainWindow(QMainWindow):
         self.worker.start()
         self._update_state()
 
+    def _confirm_model(self) -> bool:
+        """Subject detection needs a one-off 36 MB model download; ask before doing it."""
+        if self.settings.subject_mode == "off" or detect.model_ready():
+            return True
+        ans = QMessageBox.question(
+            self, "Subject detection",
+            "Subject detection (birds, animals, people) needs a detector model, 36 MB, downloaded once "
+            "from the YOLOX project (Apache-2.0 licence).\n\nDownload it now?\n\n"
+            "Choose No to continue without subject detection.")
+        if ans != QMessageBox.StandardButton.Yes:
+            self.subject_box.blockSignals(True)
+            self.subject_box.setCurrentIndex(self.subject_box.findData("off"))
+            self.subject_box.blockSignals(False)
+            self.settings.subject_mode = "off"
+        return True
+
+    def _on_subject_changed(self, _index: int):
+        mode = self.subject_box.currentData()
+        self.settings.subject_mode = mode
+        if not self.results:
+            return
+        missing = mode != "off" and any(not r.get("error") and not r.get("subjects_done") for r in self.results)
+        if missing:
+            self.start_analysis(False)          # detect subjects once; later switches are instant
+            return
+        finalize(self.results, self.settings)
+        self.thumb_cache.clear()
+        self.rebuild_grid()
+        self._update_summary()
+
     def stop_analysis(self):
         if self.worker and self.worker.isRunning():
             self.worker.cancel_event.set()
@@ -452,7 +524,10 @@ class MainWindow(QMainWindow):
     def _on_progress(self, done, total, name):
         self.progress.setMaximum(max(total, 1))
         self.progress.setValue(done)
-        self._msg(f"Analysing {done}/{total}  {name}")
+        if name == "model download":
+            self._msg(f"Downloading detector model: {done / 1e6:.0f} / {total / 1e6:.0f} MB")
+        else:
+            self._msg(f"Analysing {done}/{total}  {name}")
 
     def _on_analysis_failed(self, text):
         self.progress.hide()
@@ -461,6 +536,7 @@ class MainWindow(QMainWindow):
 
     def _on_analysis_done(self, results):
         self.progress.hide()
+        self._notices = list(self.worker.notices) if self.worker else []
         self.results = results
         self.thumb_cache.clear()
         self.rebuild_grid()
@@ -484,6 +560,11 @@ class MainWindow(QMainWindow):
             note += f"  ·  AF point known for {af}/{len(ok)} photos"
         if not faces_available():
             note += "  ·  face detection off (install the opencv-data package)"
+        if self.settings.subject_mode != "off" and ok:
+            found = sum(1 for r in ok if r.get("subject"))
+            note += f"  ·  {detect.SUBJECT_LABELS[self.settings.subject_mode].lower()} found in {found}/{len(ok)} photos"
+        for n in getattr(self, "_notices", []):
+            note += f"  ·  {n}"
         self._msg(f"{len(ok)} photos · {groups} groups · {picks} picks · {rej} auto-rejected"
                   f" · {len(self.results) - len(ok)} unreadable{note}")
 
@@ -492,6 +573,7 @@ class MainWindow(QMainWindow):
         if not self.results:
             return
         self.settings.edge_blur_px = value
+        self.settings.subject_blur_px = value * (6.0 / 6.4)      # same strictness for subject measurements
         finalize(self.results, self.settings)
         self.thumb_cache.clear()
         self.rebuild_grid()
@@ -596,9 +678,19 @@ class MainWindow(QMainWindow):
                 self.preview_cache[r["path"]] = img
             self.preview.fit_mode = True
             self.preview.set_image(img)
-            self.preview.set_overlays(r["roi"], r["faces"], r["roi_source"])
+            self._apply_overlays(r)
         except Exception as exc:
             self.preview.clear_image(f"Cannot show preview: {exc}")
+
+    def _apply_overlays(self, r: dict):
+        subj = r.get("subject")
+        if subj is not None:
+            x0, y0, x1, y1 = subj["box"]
+            roi = (x0, y0, x1 - x0, y1 - y0)
+        else:
+            roi = r["roi"]
+        others = [d for d in r.get("subjects", []) if d is not subj]
+        self.preview.set_overlays(roi, r["faces"], r["roi_source"], others, r.get("af_point"))
 
     def _show_details(self, r: dict | None):
         if r is None:
@@ -608,6 +700,7 @@ class MainWindow(QMainWindow):
             self.score_lbl.setText("")
             self.state_lbl.setText("")
             self.exif_lbl.setText("")
+            self.subject_lbl.setText("")
             self.group_lbl.setText("")
             self.reason_lbl.setText("")
             return
@@ -631,12 +724,23 @@ class MainWindow(QMainWindow):
         else:
             self.bars["face"].setValue(int(r["face_s"] * 100))
             self.bars["face"].setFormat("%p%")
-        src = {"af_point": "camera AF point", "face": "main face", "peak": "sharpest area"}[r["roi_source"]]
-        ew = r.get("edge_w")
-        edge_txt = (f"edge width {ew:.1f} px (about 3 = crisp, 7+ = blurred)" if ew is not None
-                    else "no clean edges found at the focus area")
-        self.group_lbl.setText(f"Group {r['group']} · rank {r['group_rank']} of {r['group_size']}<br>"
-                               f"Focus measured at {src}: {edge_txt}")
+        subj = r.get("subject")
+        if subj is not None:
+            sew = subj.get("edge_w")
+            af_txt = {True: "AF point on the subject", False: "AF point NOT on the subject", None: "AF point unknown"}[subj.get("af_inside")]
+            self.subject_lbl.setText(
+                f"<b>{subj['name'].capitalize()}</b> {subj['conf'] * 100:.0f}% · {subj['native_w']} px wide "
+                f"(native resolution)<br>" + (f"edge width {sew:.1f} px (3 = crisp, 6+ = blurred)" if sew is not None
+                                                else "too few clear edges to judge") + f"<br>{af_txt}")
+            self.group_lbl.setText(f"Group {r['group']} · rank {r['group_rank']} of {r['group_size']}")
+        else:
+            self.subject_lbl.setText("")
+            src = {"af_point": "camera AF point", "face": "main face", "peak": "sharpest area"}[r["roi_source"]]
+            ew = r.get("edge_w")
+            edge_txt = (f"edge width {ew:.1f} px (about 3 = crisp, 7+ = blurred)" if ew is not None
+                        else "no clean edges found at the focus area")
+            self.group_lbl.setText(f"Group {r['group']} · rank {r['group_rank']} of {r['group_size']}<br>"
+                                   f"Focus measured at {src}: {edge_txt}")
         self.reason_lbl.setText("<br>• " + "<br>• ".join(r["reasons"]) if r["reasons"] else "")
 
     # ---- actions ----------------------------------------------------------------------
@@ -715,7 +819,7 @@ class MainWindow(QMainWindow):
         if not self.current or self.current["path"] != path or not self.zoom100:
             return
         self.preview.set_image(rgb_to_qimage(arr))
-        self.preview.set_overlays(self.current["roi"], self.current["faces"], self.current["roi_source"])
+        self._apply_overlays(self.current)
         self.preview.show_100()
         self._msg(f"{self.current['name']} at 100% - drag to pan, Z to go back")
 

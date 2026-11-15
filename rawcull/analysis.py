@@ -15,7 +15,7 @@ import numpy as np
 from . import exif as exif_mod
 from .config import Settings
 from .grouping import dhash_hex
-from .loader import load_preview, map_sensor_point
+from .loader import is_raw, load_preview, map_sensor_point
 
 _FACE = None
 _EYE = None
@@ -72,7 +72,7 @@ def _lap_var(gray_blur: np.ndarray, rect=None) -> float:
     return float(cv2.Laplacian(g, cv2.CV_32F).var())
 
 
-ALGO_VERSION = 2   # bump when measurements change so stale cache entries are recomputed
+ALGO_VERSION = 3   # bump when measurements change so stale cache entries are recomputed
 
 
 def _edge_map(blur_u8: np.ndarray, min_contrast: float = 35.0) -> np.ndarray:
@@ -195,6 +195,18 @@ def _eye_hint(gray: np.ndarray, face_norm) -> int | None:
     return int(min(2, len(eyes)))
 
 
+_DETECTOR = None
+
+
+def get_detector():
+    """One ONNX session per worker process (single-threaded: the processes already run in parallel)."""
+    global _DETECTOR
+    if _DETECTOR is None:
+        from .detect import Detector
+        _DETECTOR = Detector(threads=1)
+    return _DETECTOR
+
+
 def _fingerprint(path: Path) -> str:
     st = path.stat()
     return f"{st.st_size}:{int(st.st_mtime)}"
@@ -209,8 +221,13 @@ def analyze_file(job: dict) -> dict:
             "fingerprint": _fingerprint(path), "mode": s.mode,
             "exif": {k: exif.get(k) for k in exif_mod.TAGS if exif.get(k) is not None},
             "capture_ts": exif_mod.capture_ts(exif, path)}
+    raw = native = None
     try:
-        prev = load_preview(path, s.mode)
+        if is_raw(path):
+            import rawpy
+            raw = rawpy.RawPy()
+            raw.open_file(str(path))
+        prev = load_preview(path, s.mode, raw=raw)
         bgr = prev.bgr
         h0, w0 = bgr.shape[:2]
         scale = s.analysis_long_edge / max(h0, w0)
@@ -239,9 +256,11 @@ def analyze_file(job: dict) -> dict:
         peak_var, peak_rect = _peak_tile(blur)
         wmap = _edge_map(blur)
         edge_w = edge_n = None
+        af_up = None
 
         if af is not None:
             fx, fy = map_sensor_point(af[0], af[1], prev.flip)
+            af_up = (float(fx), float(fy))
             bw = s.af_box_frac
             bh = bw * w / h
             rx = min(max(fx - bw / 2, 0.0), 1.0 - bw)
@@ -276,7 +295,25 @@ def analyze_file(job: dict) -> dict:
         clip_hi = float((bgr.max(axis=2) >= 252).mean())
         clip_lo = float((gray <= 5).mean())
 
+        # --- subjects: birds / animals / people ---------------------------------------------
+        subjects, subjects_done, subject_error = [], False, None
+        if s.subject_mode != "off":
+            try:
+                from . import detect
+                from .native import NativeSource
+                from .subject import run_subject_stage, sharp_centers
+                if not detect.model_ready():
+                    raise RuntimeError("detector model not installed")
+                native = NativeSource(path, raw=raw)
+                centers = [af_up] if af_up is not None else sharp_centers(wmap)
+                subjects = run_subject_stage(native, bgr, af_up, centers, get_detector(), s)
+                subjects_done = True
+            except Exception as exc:     # subject detection must never fail a photo
+                subject_error = f"{type(exc).__name__}: {exc}"
+
         base.update({
+            "af_point": None if af_up is None else list(af_up),
+            "subjects": subjects, "subjects_done": subjects_done, "subject_error": subject_error,
             "w": int(w0), "h": int(h0), "flip": int(prev.flip),
             "thumb": str(thumb_path),
             "dhash": dhash_hex(gray),
@@ -292,4 +329,9 @@ def analyze_file(job: dict) -> dict:
         })
     except Exception as exc:  # corrupt file, unsupported RAW, ...
         base["error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        if native is not None:
+            native.close()
+        if raw is not None:
+            raw.close()
     return base

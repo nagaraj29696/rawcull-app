@@ -16,6 +16,9 @@ python3 -m venv .venv
 .venv/bin/pip install --upgrade pip
 .venv/bin/pip install -r requirements.txt
 
+echo "==> Subject-detection model (36 MB, YOLOX-S, Apache-2.0; skip with Ctrl+C - the app offers it on first use)"
+.venv/bin/python -m rawcull --cli --fetch-model || echo "   (model download skipped - the app will ask again)"
+
 echo "==> Launcher"
 cat > run.sh <<EOF
 #!/usr/bin/env bash

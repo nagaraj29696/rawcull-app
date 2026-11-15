@@ -1,3 +1,3 @@
 #!/usr/bin/env bash
-cd "/home/Downloads/rawcull-app"
+cd "/home/nagaraj/Downloads/rawcull-app"
 exec .venv/bin/python -m rawcull "$@"
